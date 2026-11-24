@@ -191,6 +191,50 @@ function RUN($cmd, $cwd = null, $timeout = 15){ if($cmd === "" || $cmd === null)
 function is_ajax(){
     return D("ajax") || C("ajax") || (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest');
 }
+function fetch_url($url){
+    if(function_exists('curl_init')){
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_TIMEOUT => 15,
+            CURLOPT_USERAGENT => 'phfm-updater/1.0'
+        ]);
+        $data = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if($data !== false && $code >= 200 && $code < 300) return $data;
+    }
+    if(ini_get('allow_url_fopen')){
+        $ctx = stream_context_create(['http' => ['timeout' => 15, 'header' => "User-Agent: phfm-updater/1.0\r\n"]]);
+        $data = @file_get_contents($url, false, $ctx);
+        if($data !== false) return $data;
+    }
+    return false;
+}
+function self_update(){
+    $selfName = basename(__FILE__);
+    $remoteName = ($selfName === 'pfm.php' || $selfName === 'phfm.php') ? $selfName : 'phfm.php';
+    $url = "https://raw.githubusercontent.com/cdprf/php-file-manager/main/" . $remoteName;
+    $data = fetch_url($url);
+    if($data === false || strlen($data) < 500 || strpos(ltrim($data), '<?php') !== 0){
+        return [false, "Update failed: invalid or empty response"];
+    }
+    $tmp = sys_get_temp_dir() . "/phfm_upd_" . uniqid() . ".php";
+    if(@file_put_contents($tmp, $data) === false){
+        return [false, "Update failed: cannot write temp file"];
+    }
+    if(hash_file('sha256', $tmp) === hash_file('sha256', __FILE__)){
+        @unlink($tmp);
+        return [true, "Already up to date"];
+    }
+    if(!@copy($tmp, __FILE__)){
+        @unlink($tmp);
+        return [false, "Update failed: cannot overwrite " . $selfName];
+    }
+    @unlink($tmp);
+    return [true, "Updated successfully from GitHub (" . $remoteName . ")"];
+}
 function respond($ok, $msg){
     if(is_ajax()){
         header("Content-Type: application/json; charset=UTF-8");
@@ -252,6 +296,7 @@ if(!I()){
     $err = C("login") ? "<p style='color:#f87171;margin:0 0 10px'>Invalid password</p>" : "";
     Y("<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>".render_css()."</head><body><div class='login-box'><h3>File Manager</h3>".$err.F("POST", ["password"=>["pass",""], "submit"=>["login","Login"]])."</div></body></html>");
 }
+if(D("update")){ list($ok, $msg) = self_update(); respond($ok, $msg); }
 if(D("delete")){
     $delPath = sanitize_path(D("delete"));
     $fullPath = J() . "/" . $delPath;
@@ -303,6 +348,7 @@ $ui .= "<div class='nav'>";
 $ui .= H("?path=".urlencode("/"), "[/ Root]");
 $ui .= H("?path=".urlencode(U(J())), "[Directory Up]");
 $ui .= H("?zip=.&path=".urlencode(J()), "[Bu dizini ZIP indir]");
+$ui .= H("?update=1&path=".urlencode(J()), "[Update]");
 $ui .= (stripos(PHP_OS, "WIN")===0?V():"");
 $ui .= "</div>";
 $ui .= render_breadcrumb(J());
@@ -328,6 +374,20 @@ $ui .= "<script>
       });
   }
   document.addEventListener('click', function(e){
+    var upd = e.target.closest('a[href*=\"?update=\"]');
+    if(upd){
+      e.preventDefault();
+      if(!confirm('GitHub üzerinden güncellensin mi?')) return;
+      var uUrl = upd.href + (upd.href.indexOf('?') === -1 ? '?' : '&') + 'ajax=1';
+      fetch(uUrl, {headers:{'X-Requested-With':'XMLHttpRequest'}, credentials:'same-origin'})
+        .then(function(r){ return r.json(); })
+        .then(function(res){
+          showMsg(res.ok, res.msg);
+          if(res.ok && res.msg.indexOf('Updated') === 0) setTimeout(function(){ location.reload(); }, 1000);
+        })
+        .catch(function(){ showMsg(false, 'Güncelleme isteği başarısız'); });
+      return;
+    }
     var a = e.target.closest('a[href*=\"?delete=\"]');
     if(!a) return;
     e.preventDefault();
